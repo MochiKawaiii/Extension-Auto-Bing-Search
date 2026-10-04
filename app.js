@@ -6,6 +6,9 @@
     const DEFAULT_STATE = {
         searchCount: 30,
         interval: 10,
+        keywordSource: 'online',
+        querySource: 'idle',
+        onlineQueryCount: 0,
         isRunning: false,
         currentSearch: 0,
         totalSearches: 0,
@@ -21,6 +24,8 @@
     const versionBadge = document.getElementById('versionBadge');
     const searchCountInput = document.getElementById('searchCount');
     const intervalInput = document.getElementById('interval');
+    const keywordSourceInput = document.getElementById('keywordSource');
+    const keywordHint = document.getElementById('keywordHint');
     const startBtn = document.getElementById('startBtn');
     const progressSection = document.getElementById('progressSection');
     const progressBar = document.getElementById('progressBar');
@@ -95,6 +100,7 @@
     function bindEvents() {
         startBtn.addEventListener('click', handleStartButton);
         clearLogBtn.addEventListener('click', handleClearLog);
+        keywordSourceInput.addEventListener('change', saveDraftSettings);
 
         [searchCountInput, intervalInput].forEach((input) => {
             input.addEventListener('input', validateInput);
@@ -130,19 +136,21 @@
             return;
         }
 
+        const shouldStop = currentState.isRunning;
+        const values = shouldStop ? null : getValidatedValues();
         requestPending = true;
         render();
 
         try {
-            if (currentState.isRunning) {
+            if (shouldStop) {
                 await sendMessage({ type: 'STOP_SEARCH' });
                 showTransientStatus('Search run stopped.', 'info');
             } else {
-                const values = getValidatedValues();
                 await sendMessage({
                     type: 'START_SEARCH',
                     count: values.count,
-                    interval: values.interval
+                    interval: values.interval,
+                    keywordSource: values.keywordSource
                 });
                 showTransientStatus('Search run started.', 'info');
             }
@@ -173,14 +181,13 @@
         }
 
         const values = getValidatedValues();
-        currentState = normalizeState({
-            ...currentState,
-            searchCount: values.count,
-            interval: values.interval
-        });
-
-        render();
-        await chrome.storage.local.set({ [STORAGE_KEY]: currentState });
+        try {
+            const response = await sendMessage({ type: 'UPDATE_SETTINGS', ...values });
+            currentState = normalizeState(response && response.state);
+            render();
+        } catch (error) {
+            showTransientStatus(error.message || 'Could not save the settings.', 'error');
+        }
     }
 
     function validateInput(event) {
@@ -202,7 +209,7 @@
         searchCountInput.classList.remove('error');
         intervalInput.classList.remove('error');
 
-        return { count, interval };
+        return { count, interval, keywordSource: keywordSourceInput.value === 'offline' ? 'offline' : 'online' };
     }
 
     function render() {
@@ -216,10 +223,20 @@
         const shouldShowProgress = currentState.isRunning || currentState.totalSearches > 0 || currentState.currentSearch > 0;
         const completedRun = isCompleted(currentState);
 
-        searchCountInput.value = String(currentState.searchCount);
-        intervalInput.value = String(currentState.interval);
+        const settings = [
+            [searchCountInput, String(currentState.searchCount)],
+            [intervalInput, String(currentState.interval)],
+            [keywordSourceInput, currentState.keywordSource]
+        ];
+        settings.forEach(([input, value]) => {
+            if (document.activeElement !== input || currentState.isRunning || requestPending) {
+                input.value = value;
+            }
+        });
         searchCountInput.disabled = currentState.isRunning || requestPending || !hasExtensionApi;
         intervalInput.disabled = currentState.isRunning || requestPending || !hasExtensionApi;
+        keywordSourceInput.disabled = currentState.isRunning || requestPending || !hasExtensionApi;
+        renderKeywordHint();
 
         startBtn.disabled = requestPending || !hasExtensionApi;
         startBtn.classList.toggle('running', currentState.isRunning);
@@ -242,6 +259,26 @@
 
         renderStatus(completedRun);
         renderLog(currentState.log);
+    }
+
+    function renderKeywordHint() {
+        keywordHint.classList.toggle('warning', currentState.keywordSource === 'online'
+            && ['mixed', 'fallback'].includes(currentState.querySource));
+
+        if (currentState.keywordSource === 'offline') {
+            keywordHint.textContent = 'Use the built-in keyword library.';
+        } else if (currentState.querySource === 'loading' && currentState.isRunning) {
+            keywordHint.textContent = 'Fetching fresh random topics from Wikipedia...';
+        } else if (currentState.querySource === 'online') {
+            keywordHint.textContent = `${currentState.onlineQueryCount} random topics fetched from Wikipedia for this run.`;
+        } else if (currentState.querySource === 'mixed') {
+            const backupCount = currentState.totalSearches - currentState.onlineQueryCount;
+            keywordHint.textContent = `${currentState.onlineQueryCount} online topics, plus ${backupCount} built-in backup keywords.`;
+        } else if (currentState.querySource === 'fallback') {
+            keywordHint.textContent = 'Online topics are unavailable. This run uses built-in backup keywords.';
+        } else {
+            keywordHint.textContent = 'Fetch new Vietnamese and English topics from Wikipedia each run.';
+        }
     }
 
     function renderStatus(completedRun) {
@@ -315,6 +352,7 @@
     function renderUnavailableMode() {
         searchCountInput.disabled = true;
         intervalInput.disabled = true;
+        keywordSourceInput.disabled = true;
         startBtn.disabled = true;
         clearLogBtn.disabled = true;
         showTransientStatus('Load this folder as an unpacked extension to use the popup.', 'error');
@@ -355,6 +393,11 @@
         return {
             searchCount: clampInteger(nextState.searchCount, DEFAULT_STATE.searchCount, 1, 100),
             interval: clampInteger(nextState.interval, DEFAULT_STATE.interval, 3, 60),
+            keywordSource: nextState.keywordSource === 'offline' ? 'offline' : 'online',
+            querySource: ['idle', 'loading', 'online', 'mixed', 'offline', 'fallback'].includes(nextState.querySource)
+                ? nextState.querySource
+                : DEFAULT_STATE.querySource,
+            onlineQueryCount: clampInteger(nextState.onlineQueryCount, 0, 0, totalSearches),
             isRunning: Boolean(nextState.isRunning),
             currentSearch: Math.min(currentSearch, totalSearches || currentSearch),
             totalSearches,

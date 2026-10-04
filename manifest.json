@@ -1,15 +1,17 @@
 {
     "manifest_version": 3,
     "name": "Bing Search Automator",
-    "version": "1.2.1",
-    "description": "Run Bing searches from a Chrome extension with a larger built-in keyword library for Microsoft Rewards routines.",
+    "version": "1.3.0",
+    "description": "Run Bing searches with random online topics from Wikipedia and a built-in keyword backup.",
     "permissions": [
         "alarms",
         "storage",
         "tabs"
     ],
     "host_permissions": [
-        "https://www.bing.com/*"
+        "https://www.bing.com/*",
+        "https://vi.wikipedia.org/*",
+        "https://en.wikipedia.org/*"
     ],
     "background": {
         "service_worker": "sw.js"

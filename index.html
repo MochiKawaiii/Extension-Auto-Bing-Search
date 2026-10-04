@@ -17,7 +17,12 @@
             min-width: 420px;
             max-width: 420px;
             background: #0f172a;
-            overflow: hidden;
+        }
+
+        html {
+            max-height: 600px;
+            overflow-x: hidden;
+            overflow-y: auto;
         }
 
         .popup-width-lock,
@@ -39,7 +44,7 @@
             <div>
                 <p class="eyebrow">Bing Search Automator</p>
                 <h1>Search Runner</h1>
-                <p class="subtitle">Fresh popup rebuild focused on stable Edge rendering.</p>
+                <p class="subtitle">Discover random topics from the web with each run.</p>
             </div>
             <span id="versionBadge" class="version-badge">v-</span>
         </header>
@@ -55,6 +60,15 @@
                 <label for="interval">Interval in seconds</label>
                 <input id="interval" type="number" min="3" max="60" value="10" inputmode="numeric">
                 <p class="field-hint">Choose between 3 and 60 seconds.</p>
+            </div>
+
+            <div class="field">
+                <label for="keywordSource">Keyword source</label>
+                <select id="keywordSource" aria-describedby="keywordHint">
+                    <option value="online">Random online topics (Wikipedia)</option>
+                    <option value="offline">Built-in keyword library</option>
+                </select>
+                <p id="keywordHint" class="field-hint" role="status">Fetch new Vietnamese and English topics from Wikipedia each run.</p>
             </div>
         </section>
 

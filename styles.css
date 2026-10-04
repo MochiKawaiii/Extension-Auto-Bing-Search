@@ -106,7 +106,8 @@ body.extension-popup {
     font-weight: 600;
 }
 
-.field input {
+.field input,
+.field select {
     width: 100%;
     height: 46px;
     padding: 0 12px;
@@ -117,7 +118,8 @@ body.extension-popup {
     font: inherit;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
     outline: 2px solid rgba(56, 189, 248, 0.35);
     border-color: var(--accent);
 }
@@ -126,14 +128,20 @@ body.extension-popup {
     border-color: #ff6b8d;
 }
 
-.field input:disabled {
+.field input:disabled,
+.field select:disabled {
     opacity: 0.65;
 }
 
 .field-hint {
     margin: 8px 0 0;
     font-size: 12px;
+    line-height: 1.5;
     color: var(--muted);
+}
+
+.field-hint.warning {
+    color: #ffd77a;
 }
 
 .note-card strong {

@@ -5,10 +5,15 @@ const CLOSE_TAB_ALARM_PREFIX = 'bing-auto-close-tab-';
 const MAX_LOG_ENTRIES = 100;
 const RUNNER_WINDOW_WIDTH = 1180;
 const RUNNER_WINDOW_HEIGHT = 880;
+const ONLINE_QUERY_TIMEOUT_MS = 7000;
+const WIKIPEDIA_LANGUAGES = ['vi', 'en'];
 
 const DEFAULT_STATE = {
     searchCount: 30,
     interval: 10,
+    keywordSource: 'online',
+    querySource: 'idle',
+    onlineQueryCount: 0,
     isRunning: false,
     currentSearch: 0,
     totalSearches: 0,
@@ -373,6 +378,8 @@ async function handleMessage(message) {
             return { ok: true };
         case 'GET_STATE':
             return { ok: true, state: await readState() };
+        case 'UPDATE_SETTINGS':
+            return updateSettings(message);
         default:
             return { ok: false, error: 'Unknown message type.' };
     }
@@ -473,6 +480,7 @@ async function startSearch(message) {
     const count = clampInteger(message && message.count, DEFAULT_STATE.searchCount, 1, 100);
     const interval = clampInteger(message && message.interval, DEFAULT_STATE.interval, 3, 60);
     const previousState = await readState();
+    const keywordSource = normalizeKeywordSource((message && message.keywordSource) || previousState.keywordSource);
 
     await clearRunArtifacts(previousState);
 
@@ -480,14 +488,17 @@ async function startSearch(message) {
         ...previousState,
         searchCount: count,
         interval,
+        keywordSource,
+        querySource: keywordSource === 'online' ? 'loading' : 'offline',
+        onlineQueryCount: 0,
         isRunning: true,
         currentSearch: 0,
         totalSearches: count,
         currentQuery: 'Preparing...',
-        status: 'Running',
+        status: 'Preparing',
         log: [],
         usedQueries: [],
-        queryQueue: buildRunQueries(count),
+        queryQueue: [],
         openTabIds: [],
         runnerTabId: null,
         runnerWindowId: null,
@@ -506,6 +517,23 @@ async function startSearch(message) {
     }
 }
 
+async function updateSettings(message) {
+    const state = await readState();
+
+    if (state.isRunning) {
+        return { ok: true, state };
+    }
+
+    const nextState = await saveState({
+        ...state,
+        searchCount: clampInteger(message.count, state.searchCount, 1, 100),
+        interval: clampInteger(message.interval, state.interval, 3, 60),
+        keywordSource: normalizeKeywordSource(message.keywordSource || state.keywordSource)
+    });
+
+    return { ok: true, state: nextState };
+}
+
 async function clearLog() {
     const state = await readState();
     await saveState({
@@ -515,7 +543,7 @@ async function clearLog() {
 }
 
 async function performSearchCycle() {
-    const state = await readState();
+    let state = await readState();
 
     if (!state.isRunning) {
         return state;
@@ -526,6 +554,18 @@ async function performSearchCycle() {
             when: Date.now() + (state.interval * 1000)
         });
         return state;
+    }
+
+    // Persist the queue before navigating so the run survives worker suspension.
+    if (state.queryQueue.length === 0) {
+        const prepared = await prepareRunQueries(state.totalSearches, state.keywordSource);
+        state = await saveState({
+            ...state,
+            queryQueue: prepared.queries,
+            querySource: prepared.source,
+            onlineQueryCount: prepared.onlineCount,
+            status: 'Running'
+        });
     }
 
     const query = state.queryQueue[state.currentSearch] || getFallbackQuery(state.usedQueries);
@@ -724,6 +764,11 @@ function normalizeState(state) {
     return {
         searchCount: clampInteger(nextState.searchCount, DEFAULT_STATE.searchCount, 1, 100),
         interval: clampInteger(nextState.interval, DEFAULT_STATE.interval, 3, 60),
+        keywordSource: normalizeKeywordSource(nextState.keywordSource),
+        querySource: ['idle', 'loading', 'online', 'mixed', 'offline', 'fallback'].includes(nextState.querySource)
+            ? nextState.querySource
+            : DEFAULT_STATE.querySource,
+        onlineQueryCount: clampInteger(nextState.onlineQueryCount, 0, 0, totalSearches),
         isRunning: Boolean(nextState.isRunning),
         currentSearch: Math.min(currentSearch, totalSearches || currentSearch),
         totalSearches,
@@ -760,6 +805,124 @@ function normalizeState(state) {
         startedAt: typeof nextState.startedAt === 'number' ? nextState.startedAt : null,
         completedAt: typeof nextState.completedAt === 'number' ? nextState.completedAt : null
     };
+}
+
+function normalizeKeywordSource(source) {
+    return source === 'offline' ? 'offline' : 'online';
+}
+
+async function prepareRunQueries(count, keywordSource) {
+    if (keywordSource === 'offline') {
+        return { queries: buildRunQueries(count), source: 'offline', onlineCount: 0 };
+    }
+
+    const batchSize = Math.min(150, Math.max(20, Math.ceil(count * 1.5)));
+    const results = await Promise.allSettled(
+        WIKIPEDIA_LANGUAGES.map((language) => fetchWikipediaQueries(language, batchSize))
+    );
+    const onlineQueries = shuffleArray(uniqueQueries(
+        results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    )).slice(0, count);
+    const onlineCount = onlineQueries.length;
+
+    if (onlineCount === count) {
+        return { queries: onlineQueries, source: 'online', onlineCount };
+    }
+
+    return {
+        queries: uniqueQueries([...onlineQueries, ...buildRunQueries(count)]).slice(0, count),
+        source: onlineCount > 0 ? 'mixed' : 'fallback',
+        onlineCount
+    };
+}
+
+async function fetchWikipediaQueries(language, count) {
+    const params = new URLSearchParams({
+        action: 'query',
+        format: 'json',
+        formatversion: '2',
+        generator: 'random',
+        grnnamespace: '0',
+        grnlimit: String(count),
+        grnfilterredir: 'nonredirects',
+        grnminsize: '2000',
+        prop: 'pageprops',
+        ppprop: 'disambiguation',
+        origin: '*'
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ONLINE_QUERY_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(`https://${language}.wikipedia.org/w/api.php?${params}`, {
+            signal: controller.signal,
+            cache: 'no-store',
+            credentials: 'omit',
+            referrerPolicy: 'no-referrer'
+        });
+
+        if (!response.ok) {
+            throw new Error(`Wikipedia request failed (${response.status}).`);
+        }
+
+        const data = await response.json();
+        if (data.error || !Array.isArray(data.query && data.query.pages)) {
+            throw new Error('Wikipedia returned an invalid keyword response.');
+        }
+
+        return uniqueQueries(data.query.pages
+            .filter((page) => page && page.ns === 0 && !page.missing
+                && !Object.prototype.hasOwnProperty.call(page.pageprops || {}, 'disambiguation'))
+            .map((page) => cleanOnlineQuery(page.title))
+            .filter(Boolean));
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function cleanOnlineQuery(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+
+    const entities = {
+        amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ',
+        ndash: '\u2013', mdash: '\u2014', hellip: '\u2026',
+        lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c', rdquo: '\u201d'
+    };
+    let query = value;
+
+    // Decode nested numeric entities too, including Vietnamese characters.
+    for (let pass = 0; pass < 3; pass += 1) {
+        const decoded = query.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (entity, name) => {
+            if (name[0] !== '#') {
+                return entities[name.toLowerCase()] || entity;
+            }
+
+            const isHex = name[1].toLowerCase() === 'x';
+            const code = Number.parseInt(name.slice(isHex ? 2 : 1), isHex ? 16 : 10);
+            return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)
+                ? String.fromCodePoint(code)
+                : '';
+        });
+
+        if (decoded === query) {
+            break;
+        }
+
+        query = decoded;
+    }
+
+    query = query.replace(/<[^>]*>/g, ' ')
+        .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .normalize('NFC');
+
+    return query.length >= 2 && query.length <= 120 && /\p{L}/u.test(query)
+        && !/&(?:#x[\da-f]+|#\d+|[a-z][\da-z]+);/i.test(query)
+        ? query
+        : '';
 }
 
 function buildRunQueries(count) {
